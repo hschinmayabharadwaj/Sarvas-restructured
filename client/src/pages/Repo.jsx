@@ -1,0 +1,340 @@
+import { ArrowLeft, FileText, FolderGit2, GitBranch, GitPullRequest, Lock, Maximize2, MessageSquareCode, RefreshCw, Wand2, X } from 'lucide-react';
+import { AnimatePresence, motion } from 'motion/react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { api } from '../api.js';
+import Markdown from '../components/Markdown.jsx';
+import { PageLoading } from '../components/Skeleton.jsx';
+import ShimmerText from '../components/kokonutui/shimmer-text';
+import SmoothTab from '../components/kokonutui/smooth-tab';
+import { PlaceholdersAndVanishInput } from '../components/ui/placeholders-and-vanish-input';
+import { cn } from '../lib/utils';
+import { Link, navigate } from '../router.jsx';
+import { useServerData } from '../ssr.js';
+
+export default function Repo({ owner, name, onError }) {
+  const ssr = useServerData();
+  const [data, setData] = useState(ssr.repo ?? null);
+  const [tab, setTab] = useState('ask');
+  // An Ask answer handed to Build as a starting request.
+  const [draft, setDraft] = useState(null);
+
+  useEffect(() => { if (!ssr.repo) api.repo(owner, name).then(setData).catch(onError); }, [owner, name, onError]);
+
+  if (!data) return <PageLoading />;
+  const { repo } = data;
+
+  return (
+    <div className="space-y-6">
+      <Link to="/" className="inline-flex items-center gap-1 text-sm text-muted-foreground no-underline hover:text-foreground hover:no-underline">
+        <ArrowLeft className="size-4" aria-hidden="true" /> Dashboard
+      </Link>
+      <header className="flex flex-wrap items-start gap-4">
+        <span className="grid size-11 place-items-center rounded-lg border bg-card">
+          <FolderGit2 className="size-5 text-primary" aria-hidden="true" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate"><span className="text-muted-foreground">{repo.owner}/</span>{repo.name}</h1>
+          <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+            <span className="tag"><GitBranch className="size-3" aria-hidden="true" /><code>{repo.defaultBranch}</code></span>
+            <span className="tag">{repo.access} access</span>
+            {repo.private && <span className="tag"><Lock className="size-3" aria-hidden="true" />private</span>}
+          </p>
+        </div>
+      </header>
+      <SmoothTab
+        label="Repository tools"
+        className="max-w-none"
+        value={tab}
+        onChange={setTab}
+        items={[
+          { id: 'ask', title: 'Ask', icon: MessageSquareCode, content: <Ask owner={owner} name={name} onError={onError}
+            onRequestChange={(text) => { setDraft({ id: Date.now(), text }); setTab('build'); }} /> },
+          { id: 'build', title: 'Request a change', icon: Wand2, content: <Build key={draft?.id} initial={draft?.text} owner={owner} name={name} onError={onError} /> },
+          { id: 'readme', title: 'README', icon: FileText, content: <Readme owner={owner} name={name} data={data} onError={onError} /> },
+        ]}
+      />
+    </div>
+  );
+}
+
+function IndexBar({ owner, name, onError }) {
+  const [st, setSt] = useState(null);
+  const load = useCallback(() => api.indexStatus(owner, name).then(setSt).catch(onError), [owner, name, onError]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (st?.state !== 'indexing') return undefined;
+    const t = setTimeout(load, 2500);
+    return () => clearTimeout(t);
+  }, [st, load]);
+
+  const reindex = () => api.reindex(owner, name).then(setSt).catch(onError);
+  if (!st) return null;
+  const dot = { ready: st.stale ? 'bg-warn' : 'bg-ok', indexing: 'bg-primary motion-safe:animate-pulse', missing: 'bg-muted-foreground' }[st.state];
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+      <span className={cn('size-2 rounded-full', dot)} aria-hidden="true" />
+      {st.state === 'missing' && <span>Not indexed yet.</span>}
+      {st.state === 'indexing' && <ShimmerText text="Reading the repository…" className="text-xs font-medium" />}
+      {st.state === 'ready' && (
+        <span>
+          Indexed {st.files} files at <code>{st.commit.slice(0, 7)}</code>
+          {st.stale ? ' · new commits since, refreshed automatically when you ask' : ' · up to date'}
+        </span>
+      )}
+      {st.error && <span className="text-bad">{st.error}</span>}
+      {st.state !== 'indexing' && (
+        <button type="button" onClick={reindex} className="inline-flex items-center gap-1 text-link hover:underline">
+          <RefreshCw className="size-3" aria-hidden="true" />{st.state === 'missing' ? 'Index now' : 'Refresh'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+const STATUS_NOTE = {
+  outside_context: 'Outside the available context',
+  needs_clarification: 'Needs clarification',
+  low_confidence: 'Not confident enough to answer',
+  indexing: 'Indexing',
+};
+const PLACEHOLDERS = [
+  'Where is the checkout total calculated?',
+  'How does sign-in work?',
+  'Which files handle payments?',
+  'What happens when a user signs up?',
+  'Where are environment variables read?',
+];
+
+function Sources({ title, items }) {
+  return (
+    <>
+      <h3>{title}</h3>
+      <ul className="space-y-1 text-sm">
+        {items.map((c) => (
+          <li key={`${c.path}:${c.startLine}`}>
+            <a href={c.url} target="_blank" rel="noreferrer noopener"><code>{c.path}</code> lines {c.startLine} to {c.endLine}</a>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+// A change request seeded from a question and the files its answer cited.
+function requestFromAnswer(a) {
+  const files = [...new Set((a.citations || []).map((c) => c.path))].slice(0, 10);
+  const text = files.length ? `${a.question}\n\nRelevant files: ${files.join(', ')}` : a.question;
+  return text.slice(0, 2000);
+}
+
+function Ask({ owner, name, onError, onRequestChange }) {
+  const [answers, setAnswers] = useState([]);
+  const [busy, setBusy] = useState('');
+
+  const ask = async (question) => {
+    setBusy(question);
+    try {
+      const res = await api.ask(owner, name, question);
+      setAnswers((a) => [{ id: Date.now(), question, ...res }, ...a]);
+    } catch (err) { onError(err); } finally { setBusy(''); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2>Ask about this repository</h2>
+        <p className="mt-1 text-sm text-muted-foreground">Answers cite the files and lines they come from.</p>
+      </div>
+      <IndexBar owner={owner} name={name} onError={onError} />
+      <PlaceholdersAndVanishInput placeholders={PLACEHOLDERS} ariaLabel="Question" maxLength={2000}
+        disabled={Boolean(busy)} onSubmit={(_, q) => ask(q)} />
+      {busy && (
+        <div className="border-t pt-5">
+          <p className="text-sm font-medium">{busy}</p>
+          <ShimmerText text="Reading the code…" className="mt-1 text-sm font-medium" />
+        </div>
+      )}
+      <AnimatePresence initial={false}>
+        {answers.map((a) => (
+          <motion.article key={a.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+            className="border-t pt-5">
+            <p className="font-medium">{a.question}</p>
+            {STATUS_NOTE[a.status] && (
+              <p className={cn('tag mt-2', a.status === 'outside_context' ? 'bg-bad/10 text-bad' : '')}>{STATUS_NOTE[a.status]}</p>
+            )}
+            <div className="mt-2"><Markdown text={a.answer} /></div>
+            {a.citations?.length > 0 && <Sources title="Sources" items={a.citations} />}
+            {a.status !== 'answered' && a.sources?.length > 0 && <Sources title="Closest matches" items={a.sources.slice(0, 5)} />}
+            {a.disclosure && (
+              <p className="mt-3 text-xs text-muted-foreground">{a.disclosure}{a.commit && ` · commit ${a.commit.slice(0, 7)}`}</p>
+            )}
+            <button type="button" className="btn mt-4 h-9 px-3.5" onClick={() => onRequestChange(requestFromAnswer(a))}>
+              <GitPullRequest className="size-4" aria-hidden="true" />Turn into a change request
+            </button>
+          </motion.article>
+        ))}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+const HOW = ['You describe it', 'Agent plans, you approve', 'Built and checked in a sandbox', 'You approve the diff', 'Engineer merges the PR'];
+
+function Build({ owner, name, onError, initial = '' }) {
+  const [request, setRequest] = useState(initial);
+  const [criteria, setCriteria] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const { id } = await api.createTask(owner, name, request, criteria);
+      navigate(`/tasks/${encodeURIComponent(id)}`);
+    } catch (err) { onError(err); } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2>Request a change</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Describe a feature, a bug or a UI change and how it should behave. The agent asks if anything is unclear.{' '}
+          <strong className="text-foreground">An engineer must review and merge the pull request.</strong>
+        </p>
+      </div>
+      <ol className="flex flex-wrap gap-2 text-xs">
+        {HOW.map((s, i) => (
+          <li key={s} className="tag"><span className="font-semibold text-link">{i + 1}</span>{s}</li>
+        ))}
+      </ol>
+      <form onSubmit={submit} className="space-y-4">
+        <div>
+          <label htmlFor="req" className="mb-1.5 block text-sm font-medium">What should change?</label>
+          <textarea id="req" className="field min-h-28" value={request} maxLength={2000} onChange={(e) => setRequest(e.target.value)}
+            placeholder="On the pricing page, the yearly plan should show the monthly equivalent price under it." />
+          <p className="mt-1 text-right text-xs text-muted-foreground tabular-nums">{request.length}/2000</p>
+        </div>
+        <div>
+          <label htmlFor="crit" className="mb-1.5 block text-sm font-medium">
+            How will we know it’s done? <span className="font-normal text-muted-foreground">(optional, one per line)</span>
+          </label>
+          <textarea id="crit" className="field min-h-24" value={criteria} maxLength={3000} onChange={(e) => setCriteria(e.target.value)}
+            placeholder={'Yearly plan shows "$8/month billed yearly"\nMonthly plan is unchanged'} />
+        </div>
+        <button type="submit" className="btn btn-primary" disabled={busy || request.trim().length < 10}>
+          <Wand2 className="size-4" aria-hidden="true" />{busy ? 'Starting…' : 'Start'}
+        </button>
+        {request.trim().length > 0 && request.trim().length < 10 && (
+          <span className="ml-3 text-xs text-muted-foreground">A few more words, please.</span>
+        )}
+      </form>
+    </div>
+  );
+}
+
+// Nearly full-screen window for reading a long README: title bar, close button, Escape closes.
+function ReadmeWindow({ title, text, onClose }) {
+  const close = useRef(null);
+  useEffect(() => {
+    const opener = document.activeElement;
+    close.current?.focus();
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', onKey);
+    document.documentElement.style.overflow = 'hidden';  // the page behind stays put
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.documentElement.style.overflow = '';
+      opener?.focus?.();
+    };
+  }, [onClose]);
+
+  // Portal to <body>, so `fixed` covers the viewport whatever ancestor styles apply.
+  return createPortal(
+    <div className="fixed inset-0 z-50 bg-dark/50 p-3 sm:p-6" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div role="dialog" aria-modal="true" aria-label={title}
+        className="mx-auto flex h-full max-w-[1600px] flex-col overflow-hidden rounded-xl border bg-card shadow-2xl">
+        <div className="flex items-center gap-2 border-b bg-muted px-4 py-2.5 text-sm font-medium text-foreground">
+          <FileText className="size-4 text-primary" aria-hidden="true" />
+          <span className="truncate">{title}</span>
+          <span className="flex-1" />
+          <button ref={close} type="button" onClick={onClose} aria-label="Close README window"
+            className="rounded-md p-1 text-muted-foreground hover:bg-muted-strong hover:text-foreground">
+            <X className="size-4" />
+          </button>
+        </div>
+        <pre data-lenis-prevent tabIndex={0}
+          className="m-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-card p-6 font-mono text-[13px] leading-relaxed text-body sm:px-10">{text}</pre>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function Readme({ owner, name, data, onError }) {
+  const [content, setContent] = useState('');
+  const [busy, setBusy] = useState('');
+  const [full, setFull] = useState(false);
+  const closeWindow = useCallback(() => setFull(false), []);  // stable, so the window's effect runs once
+  const { repo, readme } = data;
+  // More than the fixed box shows (about 16 lines): offer to open it in a full-size window.
+  const long = readme.exists && (readme.text.split('\n').length > 16 || readme.text.length > 1200);
+
+  const run = (label, fn) => async () => {
+    setBusy(label);
+    try { await fn(); } catch (e) { onError(e); } finally { setBusy(''); }
+  };
+  const draft = run('draft', async () => setContent((await api.draft(owner, name)).markdown));
+  const propose = (action) => run('propose', async () => {
+    const { id } = await api.propose(owner, name, action, content);
+    navigate(`/changes/${encodeURIComponent(id)}`);
+  });
+
+  if (repo.access === 'read') {
+    return (
+      <div>
+        <h2>README</h2>
+        <p className="mt-1 text-sm text-muted-foreground">Adding or deleting the README directly needs write access. Use “Request a change” instead.</p>
+      </div>
+    );
+  }
+  return readme.exists ? (
+    <div className="space-y-4">
+      <h2>README.md exists</h2>
+      <pre className="code bg-card text-body h-96 min-h-40 resize-y overflow-auto whitespace-pre-wrap break-words"
+        tabIndex={0} aria-label="README.md contents (drag the corner to resize)">{readme.text}</pre>
+      <div className="flex flex-wrap gap-3">
+        {long && (
+          <button type="button" className="btn" onClick={() => setFull(true)}>
+            <Maximize2 className="size-4" aria-hidden="true" />Open in a window
+          </button>
+        )}
+        <button type="button" className="btn btn-danger" disabled={Boolean(busy)} onClick={propose('delete_readme')}>
+          Preview deleting README.md
+        </button>
+      </div>
+      {full && <ReadmeWindow title={`${owner}/${name} · README.md`} text={readme.text} onClose={closeWindow} />}
+    </div>
+  ) : (
+    <div className="space-y-4">
+      <div>
+        <h2>Add a README.md</h2>
+        <p className="mt-1 text-sm text-muted-foreground">Write it yourself, or let the AI draft one from the repository’s files and edit it.</p>
+      </div>
+      {busy === 'draft'
+        ? <div className="field grid min-h-72 place-items-center"><ShimmerText text="Drafting from the repository…" className="text-sm font-medium" /></div>
+        : <textarea className="field min-h-72 font-mono text-[13px]" value={content} maxLength={50000} placeholder={`# ${repo.name}`}
+            onChange={(e) => setContent(e.target.value)} aria-label="README content" />}
+      <div className="flex flex-wrap gap-3">
+        <button type="button" className="btn btn-primary" disabled={Boolean(busy) || !content.trim()} onClick={propose('create_readme')}>
+          {busy === 'propose' ? 'Preparing…' : 'Preview change'}
+        </button>
+        <button type="button" className="btn" disabled={Boolean(busy)} onClick={draft}>
+          <Wand2 className="size-4" aria-hidden="true" />Draft with AI
+        </button>
+      </div>
+    </div>
+  );
+}

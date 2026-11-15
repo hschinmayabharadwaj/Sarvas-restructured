@@ -1,0 +1,1 @@
+import{t as r,j as a,b as t,T as i}from"./index-C4Incm8a.js";function u({status:e,className:n}){const{label:o,tone:s}=r(e);return a.jsxs("span",{className:t("tag whitespace-nowrap",i[s],n),children:[a.jsx("span",{className:t("size-1.5 rounded-full bg-current",s==="working"&&"motion-safe:animate-pulse")}),o]})}export{u as S};

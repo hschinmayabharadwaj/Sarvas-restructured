@@ -1,0 +1,25 @@
+import { fileURLToPath } from 'node:url';
+import tailwindcss from '@tailwindcss/vite';
+import react from '@vitejs/plugin-react';
+import { defineConfig } from 'vite';
+
+// In development, run the FastAPI server on :8765 and open the Vite dev server on
+// :5173. Set web.baseUrl to http://localhost:5173 (and the GitHub App callback
+// to http://localhost:5173/auth/callback) so cookies and Host checks line up.
+export default defineConfig(({ isSsrBuild }) => ({
+  plugins: [react(), tailwindcss()],
+  resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
+  server: {
+    port: 5173,
+    strictPort: true,
+    proxy: {
+      '/api': { target: 'http://127.0.0.1:8765', changeOrigin: false },
+      '/auth': { target: 'http://127.0.0.1:8765', changeOrigin: false },
+    },
+  },
+  // Never inline assets as data: URIs; the CSP only allows fonts from 'self'.
+  build: { outDir: 'dist', sourcemap: false, assetsInlineLimit: 0 },
+  // The SSR bundle (dist-ssr/, run by server.js) carries its dependencies, so no node_modules at runtime.
+  ssr: { noExternal: true },
+  publicDir: isSsrBuild ? false : 'public',  // images and video are served from dist/, not the SSR bundle
+}));
